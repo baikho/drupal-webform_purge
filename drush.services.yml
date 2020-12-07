@@ -1,0 +1,6 @@
+services:
+  webform_purge.commands:
+    class: \Drupal\webform_purge\Commands\WebformPurgeCommands
+#    arguments: ['@foo.bar']
+    tags:
+      - { name: drush.command }
