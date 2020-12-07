@@ -1,6 +1,6 @@
 services:
   webform_purge.commands:
     class: \Drupal\webform_purge\Commands\WebformPurgeCommands
-#    arguments: ['@foo.bar']
+    arguments: ['@datetime.time','@entity_type.manager']
     tags:
       - { name: drush.command }

@@ -3,9 +3,15 @@
 namespace Drupal\webform_purge\Commands;
 
 use Drupal\Component\Datetime\TimeInterface;
+use Drupal\Core\Entity\EntityStorageException;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Logger\LoggerChannelTrait;
+use Drupal\Core\Messenger\MessengerTrait;
+use Drupal\Core\StringTranslation\StringTranslationTrait;
+use Drupal\webform\WebformInterface;
 use Drupal\webform\WebformSubmissionStorageInterface;
 use Drush\Commands\DrushCommands;
+use Drush\Exceptions\UserAbortException;
 
 /**
  * Class WebformPurgeCommands.
@@ -13,6 +19,8 @@ use Drush\Commands\DrushCommands;
  * @package Drupal\webform_purge\Commands
  */
 class WebformPurgeCommands extends DrushCommands {
+
+  use LoggerChannelTrait, MessengerTrait, StringTranslationTrait;
 
   /**
    * Conversion of 1 day in seconds (60 * 60 * 24)
@@ -52,19 +60,21 @@ class WebformPurgeCommands extends DrushCommands {
   /**
    * Runs Webform Purge command.
    *
-   * @option purge-types Types of submissions to automatically purge
+   * @option purge-type Type of submissions to automatically purge
+   *   Can be either "draft", "completed" or "all".
    * @option purge-days Days to retain submissions
    * @command webform-purge:purge
    * @aliases webform-purge-purge,wfpp
    *
    * @throws \Exception
-   *   When the Webform doesn't exist for given id.
+   *   When the Webform doesn't exist for given id or settings.
    */
   public function purge($webform_id, $options = [
-    'purge-types' => self::OPT,
+    'purge-type' => self::OPT,
     'purge-days' => self::OPT,
   ]) {
-    $purge_types = $options['purge-types'] ?: NULL;
+
+    $purge_type = $options['purge-type'] ?: NULL;
     $purge_days = $options['purge-days'] ? (int) $options['purge-days'] : NULL;
 
     /** @var \Drupal\webform\WebformEntityStorageInterface $webform_storage */
@@ -74,7 +84,7 @@ class WebformPurgeCommands extends DrushCommands {
     $webform_query->condition('id', $webform_id);
 
     // Purge types is optional, so query all types except 'none' if not given.
-    if (!$purge_types) {
+    if (!$purge_type) {
       $webform_query->condition('settings.purge', [
         WebformSubmissionStorageInterface::PURGE_DRAFT,
         WebformSubmissionStorageInterface::PURGE_COMPLETED,
@@ -88,10 +98,11 @@ class WebformPurgeCommands extends DrushCommands {
     }
 
     $results = $webform_query->execute();
+    /** @var \Drupal\webform\WebformInterface $webform */
     $webform = !empty($results) ? $webform_storage->load(reset($results)) : NULL;
 
     if (!$webform) {
-      throw new \Exception(dt('Webform not found or not eligible for purge settings.'));
+      throw new \Exception($this->dt('Webform not found or not eligible for purge settings.'));
     }
 
     /** @var \Drupal\webform\WebformSubmissionStorageInterface $webform_submission_storage */
@@ -103,6 +114,106 @@ class WebformPurgeCommands extends DrushCommands {
     $purge_days = $purge_days ?: $webform->getSetting('purge_days');
     $webform_submission_query->condition('created', $this->time->getRequestTime() - ($purge_days * self::DAY_IN_SECONDS), '<');
 
+    $purge_type = $purge_type ?: $webform->getSetting('purge');
+    if (in_array($purge_type, [
+      WebformSubmissionStorageInterface::PURGE_DRAFT,
+      WebformSubmissionStorageInterface::PURGE_COMPLETED,
+    ], TRUE)) {
+      $webform_submission_query->condition('in_draft', $purge_type === WebformSubmissionStorageInterface::PURGE_DRAFT ? 1 : 0);
+    }
+
+    $results = $webform_submission_query->execute();
+
+    if (empty($results)) {
+      throw new \Exception(dt('No submissions to purge for given query.'));
+    }
+
+    $webform_submission_total = $webform_submission_storage->getTotal($webform);
+
+    if ($this->io()->confirm($this->dt("Are you sure you want to delete @count of @total from '@title' webform?", [
+      '@count' => count($results),
+      '@total' => $webform_submission_total,
+      '@title' => $webform->label(),
+    ]))) {
+      throw new UserAbortException();
+    }
+
+    // Define a batch operation.
+    $batch_definition = [
+      'title' => $this->t('Clear submissions'),
+      'init_message' => $this->t('Clearing submission data'),
+      'error_message' => $this->t('The submissions could not be cleared because an error occurred.'),
+      'operations' => [
+        [
+          [$this, 'batchProcess'],
+          [$webform, $results],
+        ],
+      ],
+      'finished' => [
+        $this, 'batchFinish',
+      ],
+    ];
+
+    batch_set($batch_definition);
+    drush_backend_batch_process();
+  }
+
+  /**
+   * Webform purge batch API process callback.
+   *
+   * @param \Drupal\webform\WebformInterface $webform
+   *   The Webform instance.
+   * @param array $submission_ids
+   *   An array of Webform Submission Ids.
+   * @param mixed|array $context
+   *   The batch current context.
+   */
+  public function batchProcess(WebformInterface $webform, array $submission_ids, &$context) {
+
+    if (!isset($context['sandbox']['progress'])) {
+
+      // Init $sandbox vars.
+      $context['sandbox']['progress'] = 0;
+      $context['sandbox']['limit'] = 500;
+      $context['sandbox']['submission_ids'] = 500;
+      $context['sandbox']['total'] = count($submission_ids);
+    }
+
+    $batch_submission_ids = array_slice($context['sandbox']['submission_ids'], $context['sandbox']['progress'], $context['sandbox']['limit'], TRUE);
+    /** @var \Drupal\webform\WebformSubmissionStorageInterface $webform_submission_storage */
+    $webform_submission_storage = $this->entityTypeManager->getStorage('webform_submission');
+    $webform_submissions = $webform_submission_storage->loadMultiple(array_keys($batch_submission_ids));
+
+    foreach ($webform_submissions as $webform_submission) {
+      $context['sandbox']['progress']++;
+      try {
+        $webform_submission->delete();
+      }
+      catch (EntityStorageException $e) {
+        $this->getLogger('webform_purge')->error($this->t('Failed to delete "@webform_submission"', [
+          '@webform_submission' => $webform_submission->id(),
+        ]));
+      }
+    }
+
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['total'];
+  }
+
+  /**
+   * Webform purge batch API finish callback.
+   *
+   * @param bool $success
+   *   TRUE if batch successfully completed.
+   * @param array $results
+   *   Batch results.
+   */
+  public function batchFinish($success, array $results) {
+    if (!$success) {
+      $this->messenger()->addStatus($this->t('Finished with an error.'));
+    }
+    else {
+      $this->messenger()->addStatus('Process finished.');
+    }
   }
 
 }
