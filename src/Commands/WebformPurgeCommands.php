@@ -3,6 +3,7 @@
 namespace Drupal\webform_purge\Commands;
 
 use Drupal\Component\Datetime\TimeInterface;
+use Drupal\Core\DependencyInjection\DependencySerializationTrait;
 use Drupal\Core\Entity\EntityStorageException;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelTrait;
@@ -20,7 +21,7 @@ use Drush\Exceptions\UserAbortException;
  */
 class WebformPurgeCommands extends DrushCommands {
 
-  use LoggerChannelTrait, MessengerTrait, StringTranslationTrait;
+  use DependencySerializationTrait, LoggerChannelTrait, MessengerTrait, StringTranslationTrait;
 
   /**
    * Conversion of 1 day in seconds (60 * 60 * 24)
@@ -102,7 +103,7 @@ class WebformPurgeCommands extends DrushCommands {
     $webform = !empty($results) ? $webform_storage->load(reset($results)) : NULL;
 
     if (!$webform) {
-      throw new \Exception($this->dt('Webform not found or not eligible for purge settings.'));
+      throw new \Exception(dt('Webform not found or not eligible for purge settings.'));
     }
 
     /** @var \Drupal\webform\WebformSubmissionStorageInterface $webform_submission_storage */
@@ -130,7 +131,7 @@ class WebformPurgeCommands extends DrushCommands {
 
     $webform_submission_total = $webform_submission_storage->getTotal($webform);
 
-    if ($this->io()->confirm($this->dt("Are you sure you want to delete @count of @total from '@title' webform?", [
+    if (!$this->io()->confirm($this->t("Are you sure you want to delete @count of @total from '@title' webform?", [
       '@count' => count($results),
       '@total' => $webform_submission_total,
       '@title' => $webform->label(),
@@ -175,7 +176,7 @@ class WebformPurgeCommands extends DrushCommands {
       // Init $sandbox vars.
       $context['sandbox']['progress'] = 0;
       $context['sandbox']['limit'] = 500;
-      $context['sandbox']['submission_ids'] = 500;
+      $context['sandbox']['submission_ids'] = $submission_ids;
       $context['sandbox']['total'] = count($submission_ids);
     }
 
