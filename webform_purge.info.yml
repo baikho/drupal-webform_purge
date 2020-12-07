@@ -1,7 +1,7 @@
 name: Webform Purge
 type: module
 description: Allows for more extensive purge commands in addition to the default Webform provided functionality.
-core: 8.x
+core_version_requirement: ^8.8 || ^9
 package: Webform
 dependencies:
-  - webform
+  - webform:webform
